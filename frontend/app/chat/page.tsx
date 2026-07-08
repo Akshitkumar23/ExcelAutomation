@@ -17,6 +17,26 @@ interface Session {
   createdAt: string;
 }
 
+interface MappingRow {
+  original: string;
+  mapped_to: string;
+  note: string;
+}
+
+interface SmartUploadResult {
+  session_id: string;
+  filename: string;
+  row_count: number;
+  column_count: number;
+  rag_entries: number;
+  auto_id_generated: boolean;
+  auto_id_message: string;
+  mapping_summary: MappingRow[];
+  unmapped_columns: string[];
+  preview: Record<string, any>[];
+  message: string;
+}
+
 const QUICK_QUESTIONS = [
   'Show project status overview',
   'Which projects are delayed?',
@@ -43,7 +63,10 @@ export default function ChatPage() {
   const [isListening, setIsListening] = useState(false);
   const [workspaceFile, setWorkspaceFile] = useState<{ fileName: string; projectCount: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  
+  const [uploadProgress, setUploadProgress] = useState<string>('');
+  const [smartUploadResult, setSmartUploadResult] = useState<SmartUploadResult | null>(null);
+  const [showMappingModal, setShowMappingModal] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -115,43 +138,68 @@ export default function ChatPage() {
   const uploadWorkspaceFile = async (file: File) => {
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
     if (!['.csv', '.xlsx', '.xls'].includes(ext)) {
-      alert('Unsupported file format. Please upload a .csv or .xlsx file.');
+      alert('Sirf .csv, .xlsx ya .xls files allowed hain.');
       return;
     }
-    
+
     setIsLoading(true);
+    setUploadProgress('📤 File upload ho rahi hai...');
+
     const formData = new FormData();
     formData.append('file', file);
-    
+    formData.append('session_id', activeSession);
+
     try {
-      const res = await fetch(`${API_URL}/api/analytics/upload?session_id=${activeSession}`, {
+      setUploadProgress('🤖 Gemini columns detect kar raha hai...');
+      const res = await fetch(`${API_URL}/api/smart-upload`, {
         method: 'POST',
         body: formData,
       });
-      
+
       if (!res.ok) {
         const errorData = await res.json();
         throw new Error(errorData.detail || 'Upload failed');
       }
-      
-      const data = await res.json();
+
+      const data: SmartUploadResult = await res.json();
+      setSmartUploadResult(data);
+      setShowMappingModal(true);
+
+      // Update session to use the returned session_id
+      if (data.session_id && data.session_id !== activeSession) {
+        setActiveSession(data.session_id);
+        setSessions(prev => prev.map(s =>
+          s.id === activeSession ? { ...s, id: data.session_id } : s
+        ));
+      }
+
       setWorkspaceFile({
         fileName: file.name,
-        projectCount: data.project_count || (data.message && data.message.match(/\d+/)?.[0]) || 0,
+        projectCount: data.row_count,
       });
-      
-      // Add a system assistant message indicating workspace loaded
+
+      // Add assistant message
+      const autoIdNote = data.auto_id_generated
+        ? `\n\n> ⚠️ **ID column nahi mila** — Auto-generated IDs (ROW_001, ROW_002...) assign kiye gaye hain.`
+        : '';
+
+      const unmappedNote = data.unmapped_columns.length > 0
+        ? `\n\n> ℹ️ **${data.unmapped_columns.length} column(s) recognize nahi hue** (${data.unmapped_columns.join(', ')}) — lekin ye bhi AI search mein available hain.`
+        : '';
+
       const systemMsg: Message = {
         id: generateId(),
         role: 'assistant',
-        content: `📁 **Workspace Activated**\n\nSuccessfully loaded custom file **${file.name}** into this session. All questions in this conversation will now refer to the data in this file.`,
+        content: `📁 **Smart File Upload Complete!**\n\n✅ File **${file.name}** successfully load ho gayi.\n- **${data.row_count} rows** detected\n- **${data.rag_entries} entries** AI memory mein indexed${autoIdNote}${unmappedNote}\n\nAb aap is file ke baare mein kuch bhi pooch sakte hain!`,
         timestamp: new Date().toLocaleTimeString(),
       };
-      setMessages((prev) => [...prev, systemMsg]);
+      setMessages(prev => [...prev, systemMsg]);
+
     } catch (err: any) {
       alert(`Upload failed: ${err.message}`);
     } finally {
       setIsLoading(false);
+      setUploadProgress('');
     }
   };
 
@@ -314,7 +362,7 @@ export default function ChatPage() {
         <div style={{
           position: 'absolute',
           top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(17, 24, 39, 0.9)',
+          background: 'rgba(10, 14, 26, 0.92)',
           zIndex: 100,
           display: 'flex',
           flexDirection: 'column',
@@ -324,10 +372,134 @@ export default function ChatPage() {
           margin: '10px',
           borderRadius: '16px',
           pointerEvents: 'none',
+          backdropFilter: 'blur(8px)',
         }}>
-          <div style={{ fontSize: '3rem', marginBottom: '10px' }}>📥</div>
-          <h3 style={{ color: 'var(--text-primary)' }}>Drop file to activate workspace</h3>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Only Excel (.xlsx) or CSV (.csv) files are supported.</p>
+          <div style={{ fontSize: '3.5rem', marginBottom: '12px', animation: 'bounce 1s infinite' }}>📥</div>
+          <h3 style={{ color: 'var(--text-primary)', fontSize: '1.3rem', fontWeight: 700 }}>File Yahan Drop Karo!</h3>
+          <p style={{ color: 'var(--accent-blue)', fontSize: '0.9rem', marginTop: '6px' }}>CSV · Excel (.xlsx) · XLS</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '4px' }}>AI automatically columns detect karega 🤖</p>
+        </div>
+      )}
+
+      {/* Smart Upload Mapping Modal */}
+      {showMappingModal && smartUploadResult && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.75)',
+          zIndex: 200,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '1rem',
+          backdropFilter: 'blur(6px)',
+        }} onClick={() => setShowMappingModal(false)}>
+          <div style={{
+            background: 'linear-gradient(145deg, #0f172a, #1e293b)',
+            border: '1px solid rgba(59,130,246,0.4)',
+            borderRadius: '20px',
+            padding: '2rem',
+            maxWidth: '640px',
+            width: '100%',
+            maxHeight: '85vh',
+            overflowY: 'auto',
+            boxShadow: '0 25px 60px rgba(0,0,0,0.5), 0 0 40px rgba(59,130,246,0.1)',
+          }} onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+              <div>
+                <h2 style={{ color: '#f1f5f9', fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>🧠 AI Column Detection</h2>
+                <p style={{ color: '#64748b', fontSize: '0.8rem', margin: '4px 0 0' }}>
+                  {smartUploadResult.filename} · {smartUploadResult.row_count} rows · {smartUploadResult.column_count} columns
+                </p>
+              </div>
+              <button onClick={() => setShowMappingModal(false)} style={{
+                background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '8px', color: '#94a3b8', cursor: 'pointer', padding: '6px 12px', fontSize: '0.8rem',
+              }}>✕ Close</button>
+            </div>
+
+            {/* Auto ID Warning */}
+            {smartUploadResult.auto_id_generated && (
+              <div style={{
+                background: 'rgba(245, 158, 11, 0.1)', border: '1px solid rgba(245,158,11,0.35)',
+                borderRadius: '10px', padding: '12px 16px', marginBottom: '1rem',
+                display: 'flex', alignItems: 'flex-start', gap: '10px',
+              }}>
+                <span style={{ fontSize: '1.2rem' }}>⚠️</span>
+                <div>
+                  <div style={{ color: '#fbbf24', fontWeight: 600, fontSize: '0.85rem' }}>ID Column Nahi Mila</div>
+                  <div style={{ color: '#d97706', fontSize: '0.78rem', marginTop: '2px' }}>
+                    File mein koi unique ID column detect nahi hua. Auto-generated IDs assign kar diye: ROW_001, ROW_002...
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Mapping Table */}
+            <div style={{ marginBottom: '1rem' }}>
+              <div style={{ color: '#94a3b8', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.75rem' }}>
+                Column Mapping (Original → Standard)
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {smartUploadResult.mapping_summary.map((row, i) => (
+                  <div key={i} style={{
+                    display: 'grid', gridTemplateColumns: '1fr auto 1fr',
+                    alignItems: 'center', gap: '12px',
+                    background: row.mapped_to.includes('⚠️') ? 'rgba(239,68,68,0.06)' : 'rgba(255,255,255,0.04)',
+                    border: `1px solid ${row.mapped_to.includes('⚠️') ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.07)'}`,
+                    borderRadius: '8px', padding: '8px 12px',
+                  }}>
+                    <span style={{ color: '#e2e8f0', fontSize: '0.82rem', fontFamily: 'monospace' }}>{row.original}</span>
+                    <span style={{ color: '#3b82f6', fontSize: '0.75rem' }}>→</span>
+                    <span style={{
+                      color: row.mapped_to.includes('⚠️') ? '#f87171' : '#34d399',
+                      fontSize: '0.82rem', fontFamily: 'monospace'
+                    }}>{row.mapped_to}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Preview */}
+            {smartUploadResult.preview && smartUploadResult.preview.length > 0 && (
+              <div>
+                <div style={{ color: '#94a3b8', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.75rem' }}>
+                  Data Preview (First 3 Rows)
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
+                    <thead>
+                      <tr>
+                        {Object.keys(smartUploadResult.preview[0]).slice(0, 5).map(col => (
+                          <th key={col} style={{ textAlign: 'left', padding: '6px 8px', color: '#64748b', borderBottom: '1px solid rgba(255,255,255,0.1)', whiteSpace: 'nowrap' }}>{col}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {smartUploadResult.preview.map((row, i) => (
+                        <tr key={i}>
+                          {Object.values(row).slice(0, 5).map((val: any, j) => (
+                            <td key={j} style={{ padding: '6px 8px', color: '#94a3b8', borderBottom: '1px solid rgba(255,255,255,0.05)', whiteSpace: 'nowrap', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {String(val ?? '')}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Footer */}
+            <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowMappingModal(false)} style={{
+                background: 'linear-gradient(135deg, #3b82f6, #06b6d4)',
+                border: 'none', borderRadius: '10px', color: 'white',
+                padding: '10px 24px', cursor: 'pointer', fontWeight: 600, fontSize: '0.88rem',
+              }}>✅ Theek Hai, Chat Shuru Karo!</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -455,46 +627,63 @@ export default function ChatPage() {
         </div>
 
         {workspaceFile && (
-          <div className="workspace-badge-card" style={{
+          <div style={{
             margin: '0 1.5rem 10px',
-            padding: '10px 14px',
-            background: 'rgba(59, 130, 246, 0.1)',
-            border: '1px solid rgba(59, 130, 246, 0.3)',
-            borderRadius: '10px',
+            padding: '10px 16px',
+            background: 'linear-gradient(135deg, rgba(59,130,246,0.12), rgba(6,182,212,0.08))',
+            border: '1px solid rgba(59,130,246,0.35)',
+            borderRadius: '12px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
+            gap: '12px',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{ fontSize: '1.2rem' }}>📁</span>
-              <div>
-                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                  Active Session Workspace
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
+              <span style={{ fontSize: '1.3rem', flexShrink: 0 }}>🧠</span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f1f5f9' }}>
+                  Smart Workspace Active
+                  {smartUploadResult?.auto_id_generated && (
+                    <span style={{ marginLeft: '6px', background: 'rgba(245,158,11,0.2)', color: '#fbbf24', fontSize: '0.68rem', padding: '1px 6px', borderRadius: '4px', fontWeight: 600 }}>AUTO-ID</span>
+                  )}
                 </div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                  {workspaceFile.fileName} ({workspaceFile.projectCount} projects)
+                <div style={{ fontSize: '0.72rem', color: '#64748b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {workspaceFile.fileName} · {workspaceFile.projectCount} rows
+                  {smartUploadResult && smartUploadResult.unmapped_columns.length > 0 && (
+                    <span style={{ marginLeft: '6px', color: '#f87171' }}>· {smartUploadResult.unmapped_columns.length} unrecognized col(s)</span>
+                  )}
                 </div>
               </div>
             </div>
-            <button 
-              onClick={deleteWorkspace}
-              title="Delete workspace and restore permanent database"
-              style={{
-                background: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid rgba(239, 68, 68, 0.3)',
-                color: '#ef4444',
-                padding: '4px 8px',
-                borderRadius: '6px',
-                fontSize: '0.75rem',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px'
-              }}
-            >
-              🗑️ Delete
-            </button>
+            <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+              {smartUploadResult && (
+                <button onClick={() => setShowMappingModal(true)} style={{
+                  background: 'rgba(59,130,246,0.15)', border: '1px solid rgba(59,130,246,0.3)',
+                  color: '#60a5fa', padding: '4px 10px', borderRadius: '6px',
+                  fontSize: '0.72rem', cursor: 'pointer', fontWeight: 600,
+                }}>🗺️ Mapping</button>
+              )}
+              <button onClick={deleteWorkspace} style={{
+                background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                color: '#f87171', padding: '4px 10px', borderRadius: '6px',
+                fontSize: '0.72rem', cursor: 'pointer',
+              }}>🗑️</button>
+            </div>
           </div>
+        )}
+
+        {/* Upload progress indicator */}
+        {uploadProgress && (
+          <div style={{
+            margin: '0 1.5rem 6px',
+            padding: '8px 14px',
+            background: 'rgba(6,182,212,0.1)',
+            border: '1px solid rgba(6,182,212,0.25)',
+            borderRadius: '8px',
+            fontSize: '0.8rem',
+            color: '#06b6d4',
+            animation: 'pulse 1.2s infinite',
+          }}>{uploadProgress}</div>
         )}
 
 
@@ -535,7 +724,7 @@ export default function ChatPage() {
             <textarea
               ref={textareaRef}
               className="chat-textarea"
-              placeholder="Ask about project status, budgets, delays, locations..."
+              placeholder={workspaceFile ? `'${workspaceFile.fileName}' ke baare mein poochho...` : 'Ask about project status, budgets, delays, or drop a file to upload...'}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}

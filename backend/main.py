@@ -121,11 +121,13 @@ from agents.chat_agent import router as chat_router
 from agents.analytics_agent import router as analytics_router
 from agents.docgen_agent import router as docgen_router
 from agents.orchestrator import router as orchestrator_router
+from smart_upload import router as smart_upload_router
 
 app.include_router(chat_router)
 app.include_router(analytics_router)
 app.include_router(docgen_router)
 app.include_router(orchestrator_router)
+app.include_router(smart_upload_router)
 
 # ---------------------------------------------------------------------------
 # Health & root
